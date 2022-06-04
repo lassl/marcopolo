@@ -7,7 +7,7 @@ here = Path(__file__).parent.resolve()
 # Get the long description from the README file
 long_description = (here / "README.md").read_text(encoding="utf-8")
 
-with open(here / "requirements" /"requirements-dev.txt") as fp:
+with open(here / "requirements" / "requirements-dev.txt") as fp:
     install_requires = fp.read().strip().split("\n")
 install_requires = [p.strip() for p in install_requires]
 
