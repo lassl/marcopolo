@@ -1,5 +1,8 @@
 # Dense Retrieval
 
+## Run Training on Google Colab
+https://colab.research.google.com/drive/1b2VYvxgLNbsHKvutimAN6n--Vh2WzI40?usp=sharing
+
 ## TODO
 1. W&B monitoring code
 2. whole documents inference
