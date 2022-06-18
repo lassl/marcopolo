@@ -1,0 +1,7 @@
+_target_: trainer.DPRTrainer
+learning_rate: ${learning_rate}
+num_train_epochs: ${num_train_epochs}
+max_train_steps: null
+num_warmup_steps: 0
+logging_steps: ${logging_steps}
+gradient_accumulation_steps: ${gradient_accumulation_steps}
