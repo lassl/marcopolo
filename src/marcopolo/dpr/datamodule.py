@@ -48,7 +48,7 @@ class DPRDataModule:
                 remove_columns=remove_columns,
                 keep_in_memory=True,
                 batched=True,
-                num_proc=self.num_process // 4,
+                num_proc=self.num_process,
                 desc="processing valid dataset",
             )
         self.accelerator.wait_for_everyone()
@@ -56,15 +56,14 @@ class DPRDataModule:
     def _tokenize(self, example):
         q_result = self.tokenizer(example["query"], truncation=True)
         positive_passages = [
-            passage[0]["text"] if isinstance(passage, list) else passage["text"]
-            for passage in example["positive_passages"]
-        ]
-        negative_passages = [
-            passage[0]["text"] if isinstance(passage, list) else passage["text"]
-            for passage in example["negative_passages"]
+            passage[0]["text"] for passage in example["positive_passages"]
         ]
         p_result = self.tokenizer(positive_passages, truncation=True)
+        negative_passages = [
+            passage[0]["text"] for passage in example["negative_passages"]
+        ]
         n_result = self.tokenizer(negative_passages, truncation=True)
+        
         result = dict()
         for key, value in q_result.items():
             result["q_" + key] = value

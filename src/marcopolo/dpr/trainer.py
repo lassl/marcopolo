@@ -23,6 +23,7 @@ class DPRTrainer:
         num_warmup_steps,
         logging_steps,
         gradient_accumulation_steps,
+        save_directory,
     ):
         self.model = model
         self.datamodule = datamodule
@@ -35,6 +36,7 @@ class DPRTrainer:
         self.num_warmup_steps = num_warmup_steps
         self.logging_steps = logging_steps
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.save_directory = save_directory
         self.criterion = torch.nn.CrossEntropyLoss()
         self.train_dataloader = datamodule.train_dataloader()
         self.valid_dataloader = datamodule.valid_dataloader()
@@ -49,6 +51,7 @@ class DPRTrainer:
             os.makedirs("models", exist_ok=True)
             os.makedirs("models/q_encoder", exist_ok=True)
             os.makedirs("models/c_encoder", exist_ok=True)
+            os.makedirs("models/tokenizer", exist_ok=True)
 
     def adjust_train_steps(self):
         self.num_update_steps_per_epoch = math.ceil(
@@ -61,22 +64,12 @@ class DPRTrainer:
         optimizer_grouped_parameters = [
             {
                 "params": [
-                    p for n, p in self.model.q_encoder.named_parameters() if not any(nd in n for nd in no_decay)
+                    p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": 1e-4,
             },
             {
-                "params": [p for n, p in self.model.q_encoder.named_parameters() if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-            {
-                "params": [
-                    p for n, p in self.model.c_encoder.named_parameters() if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 1e-4,
-            },
-            {
-                "params": [p for n, p in self.model.c_encoder.named_parameters() if any(nd in n for nd in no_decay)],
+                "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
                 "weight_decay": 0.0,
             },
         ]
@@ -87,14 +80,12 @@ class DPRTrainer:
 
     def acccelerate_prepare(self):
         (
-            self.model.q_encoder,
-            self.model.c_encoder,
+            self.model,
             self.train_dataloader,
             self.valid_dataloader,
             self.optimizer,
         ) = self.accelerator.prepare(
-            self.model.q_encoder, 
-            self.model.c_encoder, 
+            self.model,
             self.train_dataloader, 
             self.valid_dataloader, 
             self.optimizer,
@@ -104,16 +95,6 @@ class DPRTrainer:
         device = self.accelerator.device
         self.metric_acc.to(device)
 
-    def save_model(self):
-        self.accelerator.wait_for_everyone()
-        uw_q_encoder = self.accelerator.unwrap_model(self.model.q_encoder)
-        uw_c_encoder = self.accelerator.unwrap_model(self.model.c_encoder)
-        uw_q_encoder.save_pretrained("models/q_encoder", save_function=self.accelerator.save)
-        uw_c_encoder.save_pretrained("models/c_encoder", save_function=self.accelerator.save)
-        if self.accelerator.is_main_process:
-            self.tokenizer.save_pretrained("models/q_encoder")
-            self.tokenizer.save_pretrained("models/c_encoder")
-
     def fit(self):
         best_acc = 0
         for epoch in range(self.num_train_epochs):
@@ -122,13 +103,20 @@ class DPRTrainer:
             acc = self.validate()
 
             if best_acc < acc:
-                self.save_model()
+                self.accelerator.wait_for_everyone()
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                unwrapped_model.save_pretrained(
+                    self.save_directory, 
+                    is_main_process=self.accelerator.is_main_process, 
+                    save_function=self.accelerator.save,
+                )
+                if self.accelerator.is_main_process:
+                    self.tokenizer.save_pretrained(os.path.join(self.save_directory, "tokenizer"))
                 best_acc = acc
 
     def train(self):
         losses = AverageMeter()
-        self.model.q_encoder.train()
-        self.model.c_encoder.train()
+        self.model.train()
         tepoch = tqdm(range(self.num_update_steps_per_epoch), unit="ba", disable=not self.accelerator.is_main_process,)
         for step, batch in enumerate(self.train_dataloader):
             tepoch.set_description(f"Epoch {self.epoch}")
@@ -136,9 +124,9 @@ class DPRTrainer:
             p_batch = {key[2:]: value for key, value in batch.items() if key.startswith("p_")}
             n_batch = {key[2:]: value for key, value in batch.items() if key.startswith("n_")}
 
-            q_embedding = self.model.q_encoder(**q_batch).pooler_output
-            p_embedding = self.model.c_encoder(**p_batch).pooler_output
-            n_embedding = self.model.q_encoder(**n_batch).pooler_output
+            q_embedding = self.model(**q_batch, is_query=True).contiguous()
+            p_embedding = self.model(**p_batch).contiguous()
+            n_embedding = self.model(**n_batch).contiguous()
 
             q_embedding = gather(q_embedding, dim=0)
             p_embedding = gather(p_embedding, dim=0)
@@ -157,6 +145,7 @@ class DPRTrainer:
                 target=targets,
             )
             loss = loss / self.gradient_accumulation_steps
+
             self.accelerator.backward(loss)
 
             if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_dataloader):
@@ -174,8 +163,7 @@ class DPRTrainer:
                 self.metric_acc.reset()
 
     def validate(self):
-        self.model.q_encoder.eval()
-        self.model.c_encoder.eval()
+        self.model.eval()
         p_embedding, q_embedding = [], []
         with torch.no_grad():
             with tqdm(
@@ -184,11 +172,11 @@ class DPRTrainer:
                 for _, batch in enumerate(tepoch):
                     q_batch = {key[2:]: value for key, value in batch.items() if key.startswith("q_")}
                     p_batch = {key[2:]: value for key, value in batch.items() if key.startswith("p_")}
-                    q_embedding.append(self.model.q_encoder(**q_batch).pooler_output)
-                    p_embedding.append(self.model.c_encoder(**p_batch).pooler_output)
+                    q_embedding.append(self.model(**q_batch, is_query=True))
+                    p_embedding.append(self.model(**p_batch))
 
-            q_embedding = torch.cat(q_embedding, dim=0)
-            p_embedding = torch.cat(p_embedding, dim=0)
+            q_embedding = torch.cat(q_embedding, dim=0).contiguous()
+            p_embedding = torch.cat(p_embedding, dim=0).contiguous()
 
             q_embedding = gather(q_embedding, dim=0)
             p_embedding = gather(p_embedding, dim=0)
@@ -196,19 +184,17 @@ class DPRTrainer:
             logits = torch.matmul(q_embedding, p_embedding.t())
             targets = torch.arange(0, q_embedding.size(0)).to(self.accelerator.device)
             loss = self.criterion(logits, targets)
-
-        top1, top5, top20, top100 = accuracy(logits, targets, topk=(1, 5, 20, 100))
-
-        self.logger.info(
-            f"[Epoch {self.epoch}] top1={100*top1:.2f}%, top5={100*top5:.2f}%, top20={100*top20:.2f}%, top100={100*top100:.2f}%, val_loss={loss:.4f}"
-        )
-        return top1
+        topk = accuracy(logits, targets, topk=(1, 5, 20, 100))
+        mesg = f"[Epoch {self.epoch}" + "".join([f" top{k}={100*acc:.2f}%," for k, acc in topk]) + f" val_loss={loss:.4f}"
+        self.logger.info(mesg)
+        return topk[0][1]
 
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
+    assert len(topk) > 0, "topk must be provided."
     with torch.no_grad():
-        maxk = max(topk)
+        maxk = min(max(topk), len(output[-1]))
         batch_size = target.size(0)
 
         _, pred = output.topk(maxk, 1, True, True)
@@ -217,6 +203,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum()
-            res.append(correct_k.mul_(1.0 / batch_size))
+            if len(correct) >= k:
+                correct_k = correct[:k].reshape(-1).float().sum()
+                res.append([k, correct_k.mul_(1.0 / batch_size)])
         return res

@@ -5,3 +5,4 @@ max_train_steps: null
 num_warmup_steps: 0
 logging_steps: ${logging_steps}
 gradient_accumulation_steps: ${gradient_accumulation_steps}
+save_directory: models

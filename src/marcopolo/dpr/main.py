@@ -3,7 +3,7 @@ import warnings
 
 import datasets
 import hydra
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from transformers import AutoTokenizer, set_seed
@@ -18,7 +18,7 @@ def main(config: DictConfig):
     if config.get("seed"):
         set_seed(config.seed)
 
-    accelerator = Accelerator()
+    accelerator = Accelerator(kwargs_handlers=[DistributedDataParallelKwargs(broadcast_buffers=False)])
 
     set_logging_default(logger, accelerator)
 
